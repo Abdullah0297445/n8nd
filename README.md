@@ -8,13 +8,12 @@ Self-hosted [n8n](https://n8n.io) for a single host, as docker containers.
 
 ## Naming
 
-Docker-only, like the rest of this host. Nothing is installed on the host itself; every
-part runs as a container driven by docker compose.
+`n8nd` — the **`d`** marks a **docker**-only deployment. n8n runs as a container, driven
+by docker compose. Nothing is installed on the host itself.
 
-The two infrastructure repos this one depends on carry a **`d`** for that reason —
-`traefikd_host_proxy` and `postgresd_host_engine` — where the `d` marks a docker-only
-deployment and `_host_` marks host-wide infrastructure shared by every stack. This repo is
-one application, so it carries neither marker.
+There is no `_host_` marker. That marker belongs to host-wide infrastructure shared by
+every stack on the box, such as `traefikd_host_proxy` and `postgresd_host_engine`. This
+repo is one application, so it carries the `d` alone.
 
 ## Status
 
