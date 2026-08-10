@@ -20,7 +20,11 @@ repo is one application, so it carries the `d` alone.
 | Container | Image | Job |
 |---|---|---|
 | `n8n` | `docker.n8n.io/n8nio/n8n` | The editor, the webhooks, the schedules. One main process. |
-| `n8n-runners` | `docker.n8n.io/n8nio/runners` | Every Code node, in its own container. |
+| `n8n-runners` | `docker.io/n8nio/runners` | Every Code node, in its own container. |
+
+The two images come from **two registries**, and that is not a mistake. `docker.n8n.io`
+mirrors `n8nio/n8n` alone — it answers `NAME_UNKNOWN` for `n8nio/runners`. The runners image
+comes from Docker Hub.
 
 Neither publishes a host port. Only `n8n` joins the proxy network and the engine network.
 `n8n-runners` reaches the task broker and nothing else.

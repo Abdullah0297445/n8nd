@@ -145,7 +145,13 @@ services:
   n8n-runners:
     # THE TAG MUST MATCH THE n8n TAG ABOVE, EXACTLY. Two tags, one version, on
     # every upgrade.
-    image: docker.n8n.io/n8nio/runners:2.33.7
+    #
+    # A DIFFERENT REGISTRY from the image above, and that is not a mistake.
+    # docker.n8n.io mirrors n8nio/n8n alone: it answers NAME_UNKNOWN for
+    # n8nio/runners, so a pull from there fails with `not found`. The runners
+    # image comes from Docker Hub, and n8n names it `n8nio/runners` in
+    # docker/images/runners/README.md.
+    image: docker.io/n8nio/runners:2.33.7
     container_name: n8n-runners
     restart: always
     depends_on:
