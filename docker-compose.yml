@@ -1,0 +1,182 @@
+services:
+  # ---------------------------------------------------------------------------
+  # n8n itself. One main process, not queue mode.
+  #
+  # It publishes no host port. The host proxy reaches it on the proxy network,
+  # and the shared Postgres engine answers on the engine network.
+  # ---------------------------------------------------------------------------
+  n8n:
+    # An exact tag, never `latest` or `stable` — those two are the same moving
+    # tag. Migrations run at start, a failure is fatal, and about one migration
+    # in three has no `down()`. An unattended pull is thus an unattended,
+    # irreversible schema change. See the upgrade ritual in the README.
+    image: docker.n8n.io/n8nio/n8n:2.33.7
+    container_name: n8n
+    restart: always
+    environment:
+      # --- The tenant database on the shared engine --------------------------
+      # The engine prints ONE DSN. n8n reads no DSN, so the DSN is split into
+      # these five values.
+      DB_TYPE: postgresdb
+      # The door ALIAS on the engine network, not a container name. `engine` is
+      # the transaction door. `engine-session` is the session door, and this is
+      # the one word that moves n8n between them.
+      DB_POSTGRESDB_HOST: engine
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${N8N_DB_NAME}
+      DB_POSTGRESDB_USER: ${N8N_DB_USER}
+      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD}
+      # A one-way door: the first migration bakes the schema name into the
+      # tables. A later change abandons them.
+      DB_POSTGRESDB_SCHEMA: public
+      # Required by the transaction door. The driver sends a bare
+      # `SET statement_timeout` outside a transaction, which a transaction
+      # pooler never applies and then leaks to the next borrower. `0` removes
+      # the statement. The cap moves to the role, on the engine:
+      #   ALTER ROLE <the n8n role> SET statement_timeout = '5min';
+      # Without that statement n8n runs with NO cap on a shared engine.
+      DB_POSTGRESDB_STATEMENT_TIMEOUT: 0
+
+      # --- The address the outside world uses --------------------------------
+      N8N_HOST: ${N8N_HOST}
+      N8N_PROTOCOL: https
+      # `WEBHOOK_URL` is the deprecated name. n8n warns at start if you use it.
+      N8N_WEBHOOK_URL: https://${N8N_HOST}/
+      N8N_EDITOR_BASE_URL: https://${N8N_HOST}/
+      # Exactly one proxy stands in front. A larger number makes the client
+      # address spoofable, because n8n then trusts more forwarded hops than
+      # exist.
+      N8N_PROXY_HOPS: 1
+      # N8N_PORT stays unset, so n8n listens on 5678.
+
+      # --- The encryption key ------------------------------------------------
+      # A one-way door. Lose it and every saved credential stops decrypting, for
+      # good. It is not in the database, and it cannot be derived.
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+
+      # --- Task runners ------------------------------------------------------
+      # Every Code node runs on a runner in 2.x. `internal`, the default, runs it
+      # as a child process in this container, with the same uid and gid. The
+      # docs call that "not recommended for production", so the runner gets its
+      # own container.
+      N8N_RUNNERS_MODE: external
+      N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN}
+      # The broker binds to 127.0.0.1 by default, which no sidecar can reach.
+      # The broker port, 5679, stays inside the compose network: no host port,
+      # and no traefik route.
+      N8N_RUNNERS_BROKER_LISTEN_ADDRESS: 0.0.0.0
+
+      # --- What n8n keeps, and where -----------------------------------------
+      # Binary data goes to the volume below, not into the shared engine. This
+      # is a one-way door: a later mode change does not move the old files, and
+      # pruning reclaims only the mode in use.
+      N8N_DEFAULT_BINARY_DATA_MODE: filesystem
+      # Execution data stays in the engine, so the engine archive covers it and
+      # a restore returns an instance that agrees with itself. The two settings
+      # below keep it small.
+      N8N_EXECUTION_DATA_STORAGE_MODE: database
+      EXECUTIONS_DATA_PRUNE: true
+      # 7 days and 2000 rows. The defaults, 336 h and 10 000 rows, are ceilings
+      # rather than budgets, and this engine is shared.
+      EXECUTIONS_DATA_MAX_AGE: 168
+      EXECUTIONS_DATA_PRUNE_MAX_COUNT: 2000
+
+      # --- Time --------------------------------------------------------------
+      # One name feeds both. TZ sets the container clock. GENERIC_TIMEZONE sets
+      # what a workflow means by "03:00". Set only TZ, and schedules keep firing
+      # on the America/New_York default, silently.
+      GENERIC_TIMEZONE: ${TZ}
+      TZ: ${TZ}
+    volumes:
+      # Postgres holds the workflows and the credentials. This volume holds what
+      # Postgres does not: .n8n/storage, which is the binary data of an
+      # execution. The engine archive does NOT cover it.
+      - n8n_data:/home/node/.n8n
+    healthcheck:
+      # /healthz/readiness answers 200 only when the database is connected, the
+      # migrations are done, and n8n has finished its start. /healthz always
+      # answers ok and says nothing about the database, so it is the wrong one.
+      #
+      # `node`, not `wget` or `curl`: the image is built on a hardened Alpine
+      # base with apk removed, and node is the one binary the image must have.
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://127.0.0.1:5678/healthz/readiness',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      # The first start runs every migration on an empty database.
+      start_period: 60s
+    labels:
+      - "traefik.enable=true"
+      # HTTP. It only redirects. force-secure is defined on the traefik
+      # container itself, in the proxy repo.
+      - "traefik.http.routers.n8n-public.rule=Host(`${N8N_HOST}`)"
+      - "traefik.http.routers.n8n-public.entrypoints=web"
+      - "traefik.http.routers.n8n-public.middlewares=force-secure@docker"
+      # HTTPS.
+      - "traefik.http.routers.n8n-secure.rule=Host(`${N8N_HOST}`)"
+      - "traefik.http.routers.n8n-secure.entrypoints=websecure"
+      - "traefik.http.routers.n8n-secure.tls.certresolver=${RESOLVER_NAME}"
+      # 5678, the port the container listens on. Nothing routes to 5679, the
+      # task-runner broker.
+      - "traefik.http.services.n8n.loadbalancer.server.port=5678"
+      # Load-bearing, not belt-and-braces. This container sits on three
+      # networks, and the proxy sets no --providers.docker.network default, so
+      # traefik would otherwise be free to pick the wrong address.
+      - "traefik.docker.network=traefik_host_network"
+    networks:
+      # default: the broker, which the runner reaches.
+      - default
+      - traefik_host_network
+      - postgres_host_network
+
+  # ---------------------------------------------------------------------------
+  # The task runners. Every Code node runs here, in its own container, with its
+  # own uid.
+  #
+  # It joins the default network only. It reaches nothing but the broker, and
+  # nothing reaches it.
+  # ---------------------------------------------------------------------------
+  n8n-runners:
+    # THE TAG MUST MATCH THE n8n TAG ABOVE, EXACTLY. Two tags, one version, on
+    # every upgrade.
+    image: docker.n8n.io/n8nio/runners:2.33.7
+    container_name: n8n-runners
+    restart: always
+    depends_on:
+      # The broker is ready when n8n is ready, so the runner waits for the
+      # healthcheck above rather than retrying against a port that is not open.
+      n8n:
+        condition: service_healthy
+    environment:
+      # The broker, on the default network. `n8n` is the service name.
+      N8N_RUNNERS_TASK_BROKER_URI: http://n8n:5679
+      # The same token as n8n. The runner authenticates with it, and takes a
+      # grant token for each runner it starts.
+      N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN}
+      # Every node in a Code node reads the workflow timezone from here.
+      GENERIC_TIMEZONE: ${TZ}
+      TZ: ${TZ}
+    networks:
+      - default
+
+volumes:
+  # The binary data of an execution. The engine archive does not reach it, so it
+  # needs a backup of its own.
+  n8n_data:
+
+networks:
+  # Created by the host proxy stack, not by this one.
+  traefik_host_network:
+    name: traefik_host_network
+    external: true
+  # Created by hand for the shared engine:
+  #   docker network create postgres_host_network
+  postgres_host_network:
+    name: postgres_host_network
+    external: true
