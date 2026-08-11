@@ -3,7 +3,7 @@ services:
   # n8n itself. One main process, not queue mode.
   #
   # It publishes no host port. The host proxy reaches it on the proxy network,
-  # and the shared Postgres engine answers on the engine network.
+  # and the Postgres server answers on the Postgres network.
   # ---------------------------------------------------------------------------
   n8n:
     # An exact tag, never `latest` or `stable` — those two are the same moving
@@ -14,13 +14,14 @@ services:
     container_name: n8n
     restart: always
     environment:
-      # --- The tenant database on the shared engine --------------------------
-      # The engine prints ONE DSN. n8n reads no DSN, so the DSN is split into
-      # these five values.
+      # --- The n8n database on the Postgres server ---------------------------
+      # n8n reads no connection URL, so the one your server gave you is split
+      # into these five values.
       DB_TYPE: postgresdb
-      # The door ALIAS on the engine network, not a container name. `engine` is
-      # the transaction door. `engine-session` is the session door, and this is
-      # the one word that moves n8n between them.
+      # A network ALIAS, not a container name. Where a connection pooler stands
+      # in front of Postgres, this must reach a TRANSACTION-pooled endpoint —
+      # see DB_POSTGRESDB_STATEMENT_TIMEOUT below. One word moves n8n to a
+      # session-pooled endpoint instead, if it ever needs one.
       DB_POSTGRESDB_HOST: engine
       DB_POSTGRESDB_PORT: 5432
       DB_POSTGRESDB_DATABASE: ${N8N_DB_NAME}
@@ -32,7 +33,7 @@ services:
       # Required by the transaction door. The driver sends a bare
       # `SET statement_timeout` outside a transaction, which a transaction
       # pooler never applies and then leaks to the next borrower. `0` removes
-      # the statement. The cap moves to the role, on the engine:
+      # the statement. The cap moves to the role, on the Postgres server:
       #   ALTER ROLE <the n8n role> SET statement_timeout = '5min';
       # Without that statement n8n runs with NO cap on a shared engine.
       DB_POSTGRESDB_STATEMENT_TIMEOUT: 0
@@ -71,15 +72,21 @@ services:
       # is a one-way door: a later mode change does not move the old files, and
       # pruning reclaims only the mode in use.
       N8N_DEFAULT_BINARY_DATA_MODE: filesystem
-      # Execution data stays in the engine, so the engine archive covers it and
-      # a restore returns an instance that agrees with itself. The two settings
-      # below keep it small.
+      # Execution data stays in Postgres, so whatever backs the database up
+      # covers it, and a restore returns an instance that agrees with itself.
+      # The two settings below keep it small.
       N8N_EXECUTION_DATA_STORAGE_MODE: database
       EXECUTIONS_DATA_PRUNE: true
       # 7 days and 2000 rows. The defaults, 336 h and 10 000 rows, are ceilings
       # rather than budgets, and this engine is shared.
       EXECUTIONS_DATA_MAX_AGE: 168
       EXECUTIONS_DATA_PRUNE_MAX_COUNT: 2000
+      # A community node installs to the volume, and the volume has no backup.
+      # `true` makes n8n reinstall a missing package from its own database record
+      # at start, which keeps the volume disposable. It costs nothing while no
+      # community node is installed. Once one is, it can slow the start, so watch
+      # start_period below if the healthcheck begins to flap.
+      N8N_REINSTALL_MISSING_PACKAGES: true
 
       # --- Time --------------------------------------------------------------
       # One name feeds both. TZ sets the container clock. GENERIC_TIMEZONE sets
@@ -90,7 +97,7 @@ services:
     volumes:
       # Postgres holds the workflows and the credentials. This volume holds what
       # Postgres does not: .n8n/storage, which is the binary data of an
-      # execution. The engine archive does NOT cover it.
+      # execution. It needs no backup — see the volumes block at the end.
       - n8n_data:/home/node/.n8n
     healthcheck:
       # /healthz/readiness answers 200 only when the database is connected, the
@@ -114,7 +121,7 @@ services:
     labels:
       - "traefik.enable=true"
       # HTTP. It only redirects. force-secure is defined on the traefik
-      # container itself, in the proxy repo.
+      # container itself, not here.
       - "traefik.http.routers.n8n-public.rule=Host(`${N8N_HOST}`)"
       - "traefik.http.routers.n8n-public.entrypoints=web"
       - "traefik.http.routers.n8n-public.middlewares=force-secure@docker"
@@ -172,8 +179,15 @@ services:
       - default
 
 volumes:
-  # The binary data of an execution. The engine archive does not reach it, so it
-  # needs a backup of its own.
+  # NEEDS NO BACKUP, by decision. Everything here rebuilds itself:
+  #   - n8n prunes .n8n/storage together with the execution that owns it, so
+  #     nothing in it outlives EXECUTIONS_DATA_MAX_AGE. A backup would restore
+  #     files that no execution row references.
+  #   - the settings file rebuilds from .env, because the key is pinned there.
+  #   - the node cache rebuilds at start.
+  #   - a community node reinstalls at start, per N8N_REINSTALL_MISSING_PACKAGES.
+  # A file a workflow must KEEP is the workflow's job: write it to durable
+  # storage from the workflow itself. n8n deletes from .n8n/storage.
   n8n_data:
 
 networks:
